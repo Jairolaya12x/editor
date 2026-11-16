@@ -299,6 +299,9 @@ impl BenchUpApp {
                 self.plane_lock(),
             ) {
                 Ok(id) => {
+                    // A dimension placed with the tool holds its size, like a
+                    // CAD constraint. Properties can free it.
+                    let _ = self.doc.model.set_dimension_fixed(id, true);
                     self.measurement = None;
                     self.snap = None;
                     self.selected = BTreeSet::from([id]);
@@ -415,6 +418,7 @@ impl BenchUpApp {
             axis: self.single_axis_lock(),
             plane: self.plane_lock(),
             vertex: None,
+            fixed: false,
         })
     }
     pub(super) fn measurement_value(&self) -> Option<String> {

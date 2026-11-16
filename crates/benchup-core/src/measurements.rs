@@ -71,6 +71,10 @@ pub struct Dimension {
     /// Measure the separation projected onto this world plane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<Axis>,
+    /// A fixed linear dimension holds its length: edits that would change it
+    /// are refused. Absent (free) in older documents.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixed: bool,
 }
 impl Dimension {
     pub fn anchors(&self) -> impl Iterator<Item = &DimensionAnchor> {
@@ -341,6 +345,7 @@ impl Model {
             axis,
             plane,
             vertex: None,
+            fixed: false,
         };
         if dimension.layout(self).iter().any(|p| !valid_point(*p)) {
             return Err(tr!(
@@ -436,6 +441,7 @@ impl Model {
                 * 0.3,
             axis: None,
             plane: None,
+            fixed: false,
         };
         if dimension
             .annotation_points(self)

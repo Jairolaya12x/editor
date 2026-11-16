@@ -53,6 +53,8 @@ mod cutting_view;
 pub(crate) mod display_scene;
 #[path = "construction_guides.rs"]
 mod construction_guides;
+#[path = "dimension_length.rs"]
+mod dimension_length;
 #[path = "dimension_overlay.rs"]
 mod dimension_overlay;
 #[path = "drawing_inference.rs"]
@@ -436,6 +438,11 @@ pub struct BenchUpApp {
     move_modifier_down: bool,
     last_move_copy: Option<MoveCopy>,
     measurement: Option<measurement_tools::Measurement>,
+    dimension_length_input: dimension_length::DimensionLengthInput,
+    dimension_fixed_point: benchup_core::DimensionFixedPoint,
+    /// The dimension whose typed value is being applied; it alone may change
+    /// while other fixed dimensions are enforced.
+    driving_dimension: Option<u64>,
     create_guides: bool,
     guide_modifier_down: bool,
     guide_toggle_pending: bool,
@@ -475,6 +482,8 @@ pub struct BenchUpApp {
     release_notes: crate::release_notes::ReleaseNotes,
     shortcut_filter: String,
     notice: Option<(String, f64)>,
+    /// The current notice explains why an action was refused.
+    notice_warning: bool,
     dirty_since: Option<f64>,
     save_error: Option<String>,
     storage_recovery: bool,
@@ -636,6 +645,9 @@ impl BenchUpApp {
             move_modifier_down: false,
             last_move_copy: None,
             measurement: None,
+            dimension_length_input: Default::default(),
+            dimension_fixed_point: Default::default(),
+            driving_dimension: None,
             create_guides: true,
             guide_modifier_down: false,
             guide_toggle_pending: false,
@@ -674,6 +686,7 @@ impl BenchUpApp {
             about: false,
             release_notes: crate::release_notes::ReleaseNotes::default(),
             shortcut_filter: String::new(),
+            notice_warning: error.is_some(),
             notice: error.map(|e| {
                 (
                     tr!("app.could_not_restore_your_model_a_new_workspace", e = e),
@@ -760,7 +773,14 @@ impl BenchUpApp {
     }
     fn say(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         self.notice = Some((text.into(), ctx.input(|i| i.time) + 5.));
+        self.notice_warning = false;
         ctx.request_repaint_after(Duration::from_secs(5));
+    }
+    /// Explain why an action was refused, with a warning marker.
+    fn warn(&mut self, ctx: &egui::Context, text: impl Into<String>) {
+        self.notice = Some((text.into(), ctx.input(|i| i.time) + 6.));
+        self.notice_warning = true;
+        ctx.request_repaint_after(Duration::from_secs(6));
     }
     fn set_tool(&mut self, tool: Tool) {
         self.selection_click = None;
@@ -859,11 +879,17 @@ impl BenchUpApp {
     }
     /// Records an edit the caller already knows changed the model, without
     /// comparing the models again. Returns false if it was refused (shared
-    /// project without edit access) and rolled back.
+    /// project without edit access, or a fixed dimension would change) and
+    /// rolled back.
     fn commit_changed_edit(&mut self, label: &str, before: Model, ctx: &egui::Context) -> bool {
         if !self.shared_edit_allowed(ctx) {
             self.doc.model = before;
             self.say(ctx, self.shared_edit_block_reason(ctx));
+            return false;
+        }
+        if let Some(message) = self.fixed_dimension_block(&before) {
+            self.doc.model = before;
+            self.warn(ctx, message);
             return false;
         }
         let author = self.current_history_author();
@@ -1713,7 +1739,7 @@ impl BenchUpApp {
                 return;
             };
             if self.doc.model.is_locked(id) {
-                self.say(ctx, tr!("app.unlock_the_face_before_editing_it"));
+                self.warn(ctx, tr!("app.unlock_the_face_before_editing_it"));
                 return;
             }
             face_id = Some(id);
@@ -1760,7 +1786,7 @@ impl BenchUpApp {
                 return;
             }
             if self.doc.model.selection_locked(&self.selected) {
-                self.say(ctx, tr!("app.unlock_the_selection_before_editing_it"));
+                self.warn(ctx, tr!("app.unlock_the_selection_before_editing_it"));
                 return;
             }
             let Some(snap) = grip.map(|grip| Snap { point: grip.point, kind: Inference::Endpoint })
@@ -2244,6 +2270,25 @@ impl BenchUpApp {
         Some(Snap { point, kind })
     }
 
+    /// Stretching a face would change a fixed dimension, but adding a new
+    /// layer of faces keeps the measured part's size. Push/Pull then builds the
+    /// new part instead, so each part keeps its own specific measurement.
+    /// When neither respects the dimension, the commit refuses with a notice.
+    fn push_pull_layers_for_fixed_dimension(edit: &Modeling, scoped: &Model, face: u64, delta: DVec3) -> bool {
+        if !edit.base.dimensions.values().any(|d| d.fixed) {
+            return false;
+        }
+        let mut stretched = scoped.clone();
+        if stretched.push_pull_along(face, delta).is_err()
+            || stretched.changed_fixed_dimension(&edit.base, None).is_none()
+        {
+            return false;
+        }
+        let mut layered = scoped.clone();
+        layered.push_pull_along_with_new_faces(face, delta).is_ok()
+            && layered.changed_fixed_dimension(&edit.base, None).is_none()
+    }
+
     fn modeling_result(tool: Tool, edit: &Modeling, value: f64) -> Result<Model, &'static str> {
         let mut model = edit.base.clone();
         match tool {
@@ -2252,10 +2297,11 @@ impl BenchUpApp {
                 let face_id = face.id;
                 let context = model.edit_context;
                 model.edit_context = model.parent(face_id);
-                if edit.keep_starting_face {
-                    model.push_pull_along_with_new_faces(face_id, edit.direction * value)?;
+                let delta = edit.direction * value;
+                if edit.keep_starting_face || Self::push_pull_layers_for_fixed_dimension(edit, &model, face_id, delta) {
+                    model.push_pull_along_with_new_faces(face_id, delta)?;
                 } else {
-                    model.push_pull_along(face_id, edit.direction * value)?;
+                    model.push_pull_along(face_id, delta)?;
                 }
                 model.edit_context = context;
             }
@@ -2325,6 +2371,13 @@ impl BenchUpApp {
         match Self::modeling_result(self.tool, edit, value) {
             Ok(model) => {
                 let before = edit.base.clone();
+                let layered = self.tool == Tool::PushPull
+                    && !edit.keep_starting_face
+                    && edit.face.is_some_and(|face| {
+                        let mut scoped = before.clone();
+                        scoped.edit_context = scoped.parent(face);
+                        Self::push_pull_layers_for_fixed_dimension(edit, &scoped, face, edit.direction * value)
+                    });
                 if self.tool == Tool::PushPull {
                     let group = edit.face.and_then(|face| before.entity_in_context(face))
                         .filter(|id| before.objects.contains_key(id));
@@ -2365,9 +2418,12 @@ impl BenchUpApp {
                     before,
                     ctx,
                 );
+                if layered {
+                    self.say(ctx, tr!("dimension_length.new_part_keeps_the_fixed_dimension"));
+                }
                 self.last_move_copy = copy;
             }
-            Err(message) => self.say(ctx, message),
+            Err(message) => self.warn(ctx, message),
         }
     }
 
@@ -4199,6 +4255,7 @@ impl BenchUpApp {
         }
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
+        self.dimension_length_inspector(ui);
         self.text_entity_info(ui);
         self.grain_direction_inspector(ui);
         if self.selected.is_empty() {
@@ -6956,26 +7013,44 @@ impl BenchUpApp {
         self.paint_dimension_overlay(&p, rect);
         if let Some((notice, until)) = &self.notice {
             if ui.input(|i| i.time) < *until {
-                let galley = p.layout(
-                    notice.clone(),
-                    FontId::proportional(12.),
-                    colors.ink,
-                    (rect.width() - 80.).clamp(120., 600.),
-                );
-                let r = Rect::from_min_size(
-                    rect.left_top() + egui::vec2(20., 20.),
-                    galley.size() + egui::vec2(24., 20.),
-                );
-                p.rect_filled(r, 7, colors.paper);
-                p.rect_stroke(
-                    r,
-                    7,
-                    Stroke::new(1., colors.border),
-                    egui::StrokeKind::Inside,
-                );
-                p.galley(r.min + egui::vec2(12., 10.), galley, colors.ink);
+                Self::paint_notice(&p, rect, notice, self.notice_warning);
             }
         }
+    }
+    /// A console-style line at the bottom of the viewport. Refusals carry a
+    /// warning marker and accent so the reason stands out from routine hints.
+    fn paint_notice(p: &egui::Painter, rect: Rect, notice: &str, warning: bool) {
+        const BACKGROUND: Color32 = Color32::from_rgba_premultiplied(20, 24, 22, 235);
+        const TEXT: Color32 = Color32::from_rgb(222, 230, 222);
+        const AMBER: Color32 = Color32::from_rgb(242, 184, 64);
+        let icon = if warning { 22. } else { 0. };
+        let text_color = if warning { AMBER } else { TEXT };
+        let galley = p.layout(
+            notice.to_owned(),
+            FontId::monospace(12.),
+            text_color,
+            (rect.width() - 80. - icon).clamp(120., 720.),
+        );
+        let size = galley.size() + egui::vec2(28. + icon, 18.);
+        let r = Rect::from_min_size(
+            egui::pos2(rect.center().x - size.x * 0.5, rect.bottom() - 24. - size.y),
+            size,
+        );
+        p.rect_filled(r, 6, BACKGROUND);
+        let edge = if warning { AMBER } else { Color32::from_gray(70) };
+        p.rect_stroke(r, 6, Stroke::new(1., edge), egui::StrokeKind::Inside);
+        if warning {
+            // Font-independent triangle with an exclamation mark.
+            let c = egui::pos2(r.left() + 14. + 7., r.center().y);
+            p.add(egui::Shape::convex_polygon(
+                vec![c + egui::vec2(0., -7.), c + egui::vec2(8., 6.), c + egui::vec2(-8., 6.)],
+                AMBER,
+                Stroke::NONE,
+            ));
+            p.line_segment([c + egui::vec2(0., -3.), c + egui::vec2(0., 1.5)], Stroke::new(1.8, BACKGROUND));
+            p.circle_filled(c + egui::vec2(0., 3.8), 1., BACKGROUND);
+        }
+        p.galley(r.min + egui::vec2(14. + icon, 9.), galley, text_color);
     }
     fn edit_context_bar(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);

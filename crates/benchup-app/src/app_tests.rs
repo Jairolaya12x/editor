@@ -5662,6 +5662,7 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
                 axis: Some(axis),
                 plane: None,
                 vertex: None,
+                fixed: false,
             };
             let layout = dimension.layout(&h.app.doc.model).map(|point| h.at(point));
             let lines = [
@@ -7681,3 +7682,220 @@ fn focus_picker_highlights_like_pointer_without_selecting() {
 
 #[path = "follow_me_ui_tests.rs"]
 mod follow_me_ui_tests;
+
+#[test]
+fn push_pull_still_works_after_resizing_from_a_dimension_and_erasing_it() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let face = *h.app.doc.model.faces.keys().next().unwrap();
+    h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+    let dimension = h
+        .app
+        .doc
+        .model
+        .add_dimension(DVec3::ZERO, DVec3::new(4., 0., 0.), -DVec3::Y)
+        .unwrap();
+    h.app.selected = BTreeSet::from([dimension]);
+    h.frame(vec![], egui::Modifiers::NONE);
+    h.app.dimension_length_input.text = "5".into();
+    h.app.apply_dimension_length(dimension, &h.ctx);
+    h.frame(vec![], egui::Modifiers::NONE);
+    let xs = || h.app.doc.model.vertices.values().map(|v| v.position.x).fold(0., f64::max);
+    assert!((xs() - 5.).abs() < 1e-7);
+
+    h.app.selected = BTreeSet::from([dimension]);
+    h.key(Key::Delete);
+    assert!(h.app.doc.model.dimensions.is_empty(), "the dimension is erased");
+    h.frame(vec![], egui::Modifiers::NONE);
+
+    h.key(Key::P);
+    assert_eq!(h.app.tool, Tool::PushPull);
+    let top = DVec3::new(2.5, 2., 1.);
+    h.click(h.at(top));
+    assert!(h.app.modeling.is_some(), "push/pull starts on the resized top face");
+    modeling_number(&mut h, "1");
+    let top_z = h.app.doc.model.vertices.values().map(|v| v.position.z).fold(0., f64::max);
+    assert!((top_z - 2.).abs() < 1e-7, "top at {top_z}");
+}
+
+#[test]
+fn push_pull_after_drawing_and_driving_a_dimension_with_the_tools() {
+    for (resize, erase) in [(false, false), (true, false), (true, true)] {
+        let mut h = Harness::new();
+        modeling_rectangle(&mut h);
+        let face = *h.app.doc.model.faces.keys().next().unwrap();
+        h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+        h.key(Key::I);
+        h.click(h.at(DVec3::ZERO));
+        h.click(h.at(DVec3::X * 4.));
+        h.click(h.at(DVec3::new(2., -1.5, 0.)));
+        let id = *h.app.doc.model.dimensions.keys().next().unwrap();
+        h.key(Key::Space);
+        let [_, _, a, b] = h.app.doc.model.dimensions[&id].layout(&h.app.doc.model);
+        h.click(h.at((a + b) * 0.5));
+        assert_eq!(h.app.selected, BTreeSet::from([id]));
+        if resize {
+            h.app.dimension_length_input.text = "5".into();
+            h.app.apply_dimension_length(id, &h.ctx);
+            h.frame(vec![], egui::Modifiers::NONE);
+        }
+        if erase {
+            h.key(Key::Delete);
+            assert!(h.app.doc.model.dimensions.is_empty());
+        }
+        h.key(Key::P);
+        assert_eq!(h.app.tool, Tool::PushPull, "resize={resize} erase={erase}");
+        h.click(h.at(DVec3::new(2., 2., 1.)));
+        assert!(h.app.modeling.is_some(), "resize={resize} erase={erase}: no push/pull; notice {:?}", h.app.notice);
+        modeling_number(&mut h, "1");
+        let top = h.app.doc.model.vertices.values().map(|v| v.position.z).fold(0., f64::max);
+        assert!((top - 2.).abs() < 1e-7, "resize={resize} erase={erase}: top {top}");
+    }
+}
+
+#[test]
+fn typing_in_the_dimension_field_returns_shortcuts_to_the_viewport() {
+    for erase in [false, true] {
+        let mut h = Harness::new();
+        modeling_rectangle(&mut h);
+        let face = *h.app.doc.model.faces.keys().next().unwrap();
+        h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+        let id = h
+            .app
+            .doc
+            .model
+            .add_dimension(DVec3::ZERO, DVec3::X * 4., -DVec3::Y * 1.5)
+            .unwrap();
+        h.app.selected = BTreeSet::from([id]);
+        h.frame(vec![], egui::Modifiers::NONE);
+        let field = dimension_length::field_id();
+        h.ctx.memory_mut(|m| m.request_focus(field));
+        h.frame(vec![], egui::Modifiers::NONE);
+        assert!(h.ctx.memory(|m| m.has_focus(field)), "the field is shown and focusable");
+        h.frame(vec![egui::Event::Key {
+            key: Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }], egui::Modifiers::COMMAND);
+        h.frame(vec![egui::Event::Text("5".into())], egui::Modifiers::NONE);
+        h.key(Key::Enter);
+        let right = h.app.doc.model.vertices.values().map(|v| v.position.x).fold(0., f64::max);
+        assert!((right - 5.).abs() < 1e-7, "typed value applied: {right}; notice {:?}", h.app.notice);
+        assert!(!h.ctx.memory(|m| m.has_focus(field)), "Enter releases the keyboard");
+        if erase {
+            h.key(Key::Delete);
+            assert!(h.app.doc.model.dimensions.is_empty(), "Delete erases the dimension");
+        }
+        h.key(Key::P);
+        assert_eq!(h.app.tool, Tool::PushPull, "erase={erase}");
+        h.click(h.at(DVec3::new(2., 2., 1.)));
+        assert!(h.app.modeling.is_some(), "erase={erase}: notice {:?}", h.app.notice);
+        modeling_number(&mut h, "1");
+        let top = h.app.doc.model.vertices.values().map(|v| v.position.z).fold(0., f64::max);
+        assert!((top - 2.).abs() < 1e-7, "erase={erase}: top {top}");
+    }
+}
+
+#[test]
+fn fixed_dimensions_refuse_size_changes_with_a_notice_until_freed_or_erased() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let face = *h.app.doc.model.faces.keys().next().unwrap();
+    h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+    // Place an X dimension with the Dimensions tool: it starts fixed.
+    h.key(Key::I);
+    h.click(h.at(DVec3::ZERO));
+    h.click(h.at(DVec3::X * 4.));
+    h.click(h.at(DVec3::new(2., -1.5, 0.)));
+    let id = *h.app.doc.model.dimensions.keys().next().unwrap();
+    assert!(h.app.doc.model.dimensions[&id].fixed);
+    let face_at = |model: &Model, test: &dyn Fn(DVec3) -> bool| {
+        *model.faces.iter()
+            .find(|(_, f)| f.vertices.iter().all(|v| test(model.vertices[v].position)))
+            .unwrap().0
+    };
+    let pull = |h: &mut Harness, test: &dyn Fn(DVec3) -> bool| -> bool {
+        let before = h.app.doc.model.clone();
+        let face = face_at(&h.app.doc.model, test);
+        h.app.doc.model.push_pull(face, 0.5).unwrap();
+        h.app.notice = None;
+        h.app.finish_edit("Push/Pull", before.clone(), &h.ctx);
+        h.app.doc.model != before
+    };
+    let end_face = |p: DVec3| (p.x - 4.).abs() < 1e-7;
+    let history = h.app.doc.history.position();
+    assert!(!pull(&mut h, &end_face), "pulling the measured face is refused");
+    assert_eq!(h.app.doc.history.position(), history);
+    let notice = h.app.notice.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+    assert!(notice.contains(&h.app.doc.display.units.format_length(4.)), "{notice}");
+    assert!(h.app.notice_warning, "refusals are shown as warnings");
+    // The warning line paints at the bottom of the viewport.
+    h.frame(vec![], egui::Modifiers::NONE);
+    assert!(pull(&mut h, &|p: DVec3| (p.z - 1.).abs() < 1e-7), "other sizes stay editable");
+
+    // Freeing the dimension from Properties allows the change.
+    h.app.selected = BTreeSet::from([id]);
+    h.app.set_dimension_fixed(id, false, &h.ctx);
+    assert!(!h.app.doc.model.dimensions[&id].fixed);
+    assert!(pull(&mut h, &|p: DVec3| (p.x - 4.).abs() < 1e-7));
+    h.app.undo(&h.ctx, false);
+    h.app.undo(&h.ctx, false);
+    assert!(h.app.doc.model.dimensions[&id].fixed, "undo restores the fixed state");
+
+    // Erasing the dimension removes the constraint.
+    h.app.selected = BTreeSet::from([id]);
+    h.key(Key::Delete);
+    assert!(h.app.doc.model.dimensions.is_empty());
+    assert!(pull(&mut h, &end_face));
+}
+
+#[test]
+fn a_placed_dimension_is_ready_to_edit_without_reselecting() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let face = *h.app.doc.model.faces.keys().next().unwrap();
+    h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+    h.key(Key::I);
+    h.click(h.at(DVec3::ZERO));
+    h.click(h.at(DVec3::X * 4.));
+    h.click(h.at(DVec3::new(2., -1.5, 0.)));
+    let id = *h.app.doc.model.dimensions.keys().next().unwrap();
+    assert_eq!(h.app.tool, Tool::Dimensions);
+    assert_eq!(h.app.selected_length_dimension(), Some(id));
+    h.frame(vec![], egui::Modifiers::NONE);
+    assert_eq!(h.app.dimension_length_input.dimension, Some(id), "Properties shows the field");
+    assert_eq!(h.app.dimension_length_input.text, h.app.doc.display.units.format_length(4.));
+}
+
+#[test]
+fn push_pull_on_a_fixed_dimension_builds_a_new_part_instead_of_stretching() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let face = *h.app.doc.model.faces.keys().next().unwrap();
+    h.app.doc.model.push_pull_along(face, DVec3::Z).unwrap();
+    // A fixed thickness dimension on the cube's vertical edge.
+    let id = h
+        .app
+        .doc
+        .model
+        .add_dimension(DVec3::ZERO, DVec3::Z, -DVec3::Y)
+        .unwrap();
+    h.app.doc.model.set_dimension_fixed(id, true).unwrap();
+    let faces = h.app.doc.model.faces.len();
+    h.key(Key::P);
+    h.click(h.at(DVec3::new(2., 2., 1.)));
+    assert!(h.app.modeling.is_some());
+    modeling_number(&mut h, "1");
+    let model = &h.app.doc.model;
+    let top = model.vertices.values().map(|v| v.position.z).fold(0., f64::max);
+    assert!((top - 2.).abs() < 1e-7, "the new part reaches {top}");
+    assert!((model.dimensions[&id].length(model) - 1.).abs() < 1e-7, "the fixed size is kept");
+    assert!(model.faces.len() > faces, "the measured part keeps its top face");
+    assert_eq!(
+        h.app.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some(tr!("dimension_length.new_part_keeps_the_fixed_dimension"))
+    );
+    assert!(!h.app.notice_warning, "building a new part is information, not a refusal");
+    model.validate().unwrap();
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model.faces.len(), faces);
+}

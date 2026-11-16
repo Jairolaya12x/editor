@@ -164,6 +164,7 @@ struct ToolPreferences {
     walk_sitting: bool,
     axis_lock: Option<Axis>,
     second_axis_lock: Option<Axis>,
+    dimension_fixed_point: benchup_core::DimensionFixedPoint,
 }
 
 #[cfg(test)]
@@ -198,6 +199,29 @@ mod guide_preference_tests {
             restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
             assert_eq!(restored.agent_link.setup_tab, tab);
             storage.flushed = false;
+        }
+    }
+
+    #[test]
+    fn dimension_fixed_point_defaults_and_saves_without_a_model_edit() {
+        use benchup_core::DimensionFixedPoint;
+        let legacy: InspectorPreferences =
+            serde_json::from_str(r#"{"tools":{"active":"select"}}"#).unwrap();
+        assert_eq!(legacy.tools.dimension_fixed_point, DimensionFixedPoint::Start);
+        let ctx = egui::Context::default();
+        let mut app = BenchUpApp::with_document(Document::default(), None, true);
+        let mut storage = Storage::default();
+        for fixed in [DimensionFixedPoint::Center, DimensionFixedPoint::End, DimensionFixedPoint::Start] {
+            storage.flushed = false;
+            app.dimension_fixed_point = fixed;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            assert!(app.doc.history.is_empty());
+            let mut restored = BenchUpApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.dimension_fixed_point, fixed);
         }
     }
 
@@ -600,6 +624,7 @@ impl Default for ToolPreferences {
             walk_sitting: false,
             axis_lock: None,
             second_axis_lock: None,
+            dimension_fixed_point: Default::default(),
         }
     }
 }
@@ -618,6 +643,7 @@ impl ToolPreferences {
             walk_sitting: app.walk.sitting,
             axis_lock: app.lock,
             second_axis_lock: app.second_lock,
+            dimension_fixed_point: app.dimension_fixed_point,
         }
     }
 
@@ -649,6 +675,7 @@ impl ToolPreferences {
         app.move_copy = self.move_copy;
         app.create_guides = self.create_guides;
         app.walk.sitting = self.walk_sitting;
+        app.dimension_fixed_point = self.dimension_fixed_point;
         app.lock = self.axis_lock;
         app.second_lock = self.second_axis_lock
             .filter(|axis| self.axis_lock.is_some_and(|first| first != *axis));

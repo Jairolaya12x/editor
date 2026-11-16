@@ -11,6 +11,7 @@ mod cleanup;
 pub mod annotations;
 pub mod camera;
 mod csg;
+pub mod dimension_stretch;
 pub mod display;
 pub mod document;
 pub mod edit_context;
@@ -33,6 +34,7 @@ pub mod units;
 pub use annotations::TextAnnotation;
 pub use guides::ConstructionGuide;
 pub use camera::{Camera, CameraView, Projection, Ray, StandardView};
+pub use dimension_stretch::DimensionFixedPoint;
 pub use display::{DisplaySettings, FaceStyle};
 pub use document::{Document, DocumentCheckpoint, Edge, Face, History, Model, Vertex};
 pub use edit_context::InstanceTransform;
@@ -49,6 +51,8 @@ pub use units::{AngleUnit, AreaUnit, LengthUnit, UnitPrecision, UnitSettings, Vo
 
 #[cfg(test)]
 mod annotation_tests;
+#[cfg(test)]
+mod dimension_stretch_tests;
 #[cfg(test)]
 mod edit_context_tests;
 #[cfg(test)]
